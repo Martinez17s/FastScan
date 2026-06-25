@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 FastScan CLI v3 - Herramienta de Pentesting con Nmap
-Nuevas features: ETA real, perfil --evade, proxychains, CVE lookup NVD, Risk Scoring.
+Features optimizadas: ETA real, perfiles avanzados, ruteo SOCKS, NVD API Lookups estables y Risk Scoring.
 """
 
 import sys
@@ -150,27 +150,20 @@ SEVERIDAD_CVSS = {
 }
 
 def calcular_riesgo(puertos_abiertos: list, vulns: list, cves_encontrados: list) -> dict:
-    """
-    Calcula un score de riesgo 0-100 por host.
-    Retorna dict con score, nivel y breakdown.
-    """
     score = 0
     breakdown = []
 
-    # Puntos por puertos peligrosos
     for p in puertos_abiertos:
         pts = PUERTO_RIESGO.get(p, 1)
         if pts >= 7:
             score += pts
             breakdown.append(f"Puerto {p} (riesgo: {pts})")
 
-    # Puntos por vulns NSE confirmadas
     vuln_pts = len(vulns) * 20
     if vuln_pts:
         score += vuln_pts
         breakdown.append(f"{len(vulns)} vuln(s) NSE confirmada(s) (+{vuln_pts})")
 
-    # Puntos por CVEs encontrados en NVD
     for cve in cves_encontrados:
         cvss = cve.get("cvss", 0)
         sev  = cve.get("severity", "").lower()
@@ -202,10 +195,6 @@ def calcular_riesgo(puertos_abiertos: list, vulns: list, cves_encontrados: list)
 _cve_cache: dict = {}
 
 def buscar_cves_nvd(producto: str, version: str) -> list:
-    """
-    Consulta la API pública de NVD para buscar CVEs de un producto+versión.
-    Retorna lista de dicts: {id, description, cvss, severity, url}
-    """
     if not producto or len(producto) < 3:
         return []
 
@@ -213,6 +202,8 @@ def buscar_cves_nvd(producto: str, version: str) -> list:
     if cache_key in _cve_cache:
         return _cve_cache[cache_key]
 
+    # Delay táctico anti Rate Limit de la NVD
+    time.sleep(0.6)
     keyword = quote(f"{producto} {version}".strip())
     url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch={keyword}&resultsPerPage=5"
 
@@ -229,14 +220,12 @@ def buscar_cves_nvd(producto: str, version: str) -> list:
         cve_data = item.get("cve", {})
         cve_id   = cve_data.get("id", "")
 
-        # Descripción en inglés
         desc = ""
         for d in cve_data.get("descriptions", []):
             if d.get("lang") == "en":
                 desc = d.get("value", "")[:120]
                 break
 
-        # CVSS score
         cvss   = 0.0
         sev    = "unknown"
         metrics = cve_data.get("metrics", {})
@@ -247,7 +236,7 @@ def buscar_cves_nvd(producto: str, version: str) -> list:
                 sev  = m.get("cvssData", {}).get("baseSeverity", "").lower()
                 break
 
-        if cvss >= 5.0:  # Solo traer Medium o mayor
+        if cvss >= 5.0:
             resultados.append({
                 "id":          cve_id,
                 "description": desc,
@@ -261,10 +250,9 @@ def buscar_cves_nvd(producto: str, version: str) -> list:
 
 
 # ─────────────────────────────────────────────────────────────
-#  ETA ESTIMACIÓN REAL (ping sweep previo)
+#  ETA ESTIMACIÓN REAL
 # ─────────────────────────────────────────────────────────────
 def estimar_hosts_activos(target: str) -> int:
-    """Hace un ping sweep rápido y retorna cantidad de hosts activos."""
     try:
         nm_ping = nmap.PortScanner()
         nm_ping.scan(hosts=target, arguments="-sn -T5 --min-parallelism 50")
@@ -368,19 +356,29 @@ def _notificar(mensaje: str, error: bool = False):
 #  EXPORTACIÓN MARKDOWN
 # ─────────────────────────────────────────────────────────────
 def exportar_markdown(target: str, resultados: list, perfil_desc: str,
-                      vulns: list, scores: dict, cves_por_host: dict) -> str:
+                      vulns: list, scores: dict, cves_por_host: dict,
+                      nombre_archivo: str = "") -> str:
     fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fname = f"scan_{target.replace('.','_').replace('/','_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    default_fname = f"scan_{target.replace('.','_').replace('/','_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+
+    if nombre_archivo:
+        nombre_archivo = re.sub(r'[\\/*?:"<>|]', "_", nombre_archivo.strip())
+        if not nombre_archivo.endswith(".md"):
+            nombre_archivo += ".md"
+        fname = nombre_archivo
+    else:
+        fname = default_fname
 
     md  = "# FastScan v3 — Reporte de Pentesting\n\n"
     md += f"| Campo | Valor |\n|---|---|\n"
     md += f"| **Objetivo** | `{target}` |\n| **Fecha** | {fecha} |\n| **Perfil** | `{perfil_desc}` |\n\n"
 
-    # Risk summary
-    if scores:
+    # Mostrar la tabla de Score SÓLO si hay algún host con puntaje de riesgo > 0
+    hosts_con_riesgo = {h: s for h, s in scores.items() if s['score'] > 0}
+    if hosts_con_riesgo:
         md += "## 🎯 Risk Score por Host\n\n"
         md += "| Host | Score | Nivel | Factores |\n|---|:---:|:---:|---|\n"
-        for host, s in scores.items():
+        for host, s in hosts_con_riesgo.items():
             factores = "; ".join(s["breakdown"][:4])
             md += f"| {host} | {s['score']}/100 | {s['nivel_md']} | {factores} |\n"
         md += "\n"
@@ -391,7 +389,6 @@ def exportar_markdown(target: str, resultados: list, perfil_desc: str,
         det = re.sub(r'\[.*?\]', '', r['detalles']).split('\n')[0].strip()
         md += f"| {r['host']} | {r['puerto']} | {r['protocolo']} | {r['servicio']} | {det} |\n"
 
-    # CVEs
     all_cves = [(h, c) for h, clist in cves_por_host.items() for c in clist]
     if all_cves:
         md += "\n## 🔎 CVEs Encontrados (NVD)\n\n"
@@ -423,7 +420,6 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
     ip_res = resolver_hostname(target)
     perfil = PERFILES[perfil_key]
 
-    # ── Proxychains ──────────────────────────────────────────
     proxy_disponible = detectar_proxychains()
     proxy_activo     = False
     if usar_proxychains:
@@ -439,7 +435,6 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
         )
         proxy_activo = usar
 
-    # ── ETA real (ping sweep) ────────────────────────────────
     es_rango = "/" in target
     n_hosts  = 1
     if es_rango:
@@ -462,7 +457,6 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
         border_style="blue"
     ))
 
-    # ── Lanzar nmap ──────────────────────────────────────────
     nm = nmap.PortScanner()
     scan_error = [None]
 
@@ -470,16 +464,13 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
         try:
             args_finales = perfil["args"]
             if proxy_activo:
-                # proxychains requiere -sT (no SYN raw)
                 args_finales = args_finales.replace("-sS", "-sT")
                 pc_bin = get_proxychains_bin()
-                # Invocar nmap a través de proxychains vía subprocess
                 cmd = f"{pc_bin} nmap {args_finales} {target}"
                 result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
                 if result.returncode != 0:
                     scan_error[0] = result.stderr[:200]
                 else:
-                    # Parsear con nmap python desde XML
                     nm.analyse_nmap_xml_scan(result.stdout)
             else:
                 nm.scan(hosts=target, arguments=args_finales)
@@ -526,7 +517,6 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
         _notificar(f"Sin respuesta: {target}", error=True)
         return
 
-    # ── Construir tabla ──────────────────────────────────────
     tabla = Table(title=f"[bold cyan]Resultados: {target}[/bold cyan]",
                   show_lines=True, header_style="bold magenta")
     tabla.add_column("Host",       style="bold white", no_wrap=True)
@@ -538,8 +528,8 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
 
     lista_resultados  = []
     lista_vulns       = []
-    puertos_por_host: dict = {}   # host -> [puertos]
-    cves_por_host:    dict = {}   # host -> [cve dicts]
+    puertos_por_host: dict = {}
+    cves_por_host:    dict = {}
 
     for host in sorted(hosts_activos):
         puertos_por_host.setdefault(host, [])
@@ -561,22 +551,19 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
 
                 puertos_por_host[host].append(port)
 
-                # CVE lookup NVD
-                if product:
-                    cves = buscar_cves_nvd(product, version)
-                    if cves:
-                        cves_por_host[host].extend(cves)
+                cves_nuevos = []
+                if product and perfil_key in ("vuln", "web", "smb"):
+                    cves_nuevos = buscar_cves_nvd(product, version)
+                    if cves_nuevos:
+                        cves_por_host[host].extend(cves_nuevos)
 
                 hallazgos_partes = []
 
-                # Web title
                 if port in PUERTOS_WEB or "http" in name:
                     titulo = obtener_titulo_web(host, port)
                     hallazgos_partes.append(f"[dim]Title:[/dim] {titulo}")
 
-                # CVEs encontrados
-                if product and cves_por_host[host]:
-                    cves_nuevos = buscar_cves_nvd(product, version)
+                if cves_nuevos:
                     for cve in cves_nuevos[:3]:
                         sev_color = {"critical": "bold red", "high": "red",
                                      "medium": "yellow", "low": "green"}.get(cve["severity"], "white")
@@ -585,7 +572,6 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
                             f"CVSS {cve['cvss']} — {cve['description'][:60]}…"
                         )
 
-                # Scripts NSE
                 for script_id, output in pdata.get("script", {}).items():
                     salida = output.strip()
                     if not salida or salida in ("()", "ERROR"):
@@ -629,7 +615,6 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
                     "detalles": f"{version_str} | {hallazgos_str}",
                 })
 
-    # ── Risk Scoring ─────────────────────────────────────────
     scores: dict = {}
     vulns_por_host: dict = {}
     for v in lista_vulns:
@@ -642,26 +627,28 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
             cves_por_host.get(host, []),
         )
 
-    # ── Output ───────────────────────────────────────────────
     if tabla.rows:
         console.print("\n")
         console.print(tabla)
 
-        # Tabla de Risk Score
-        score_tabla = Table(title="🎯 Risk Score por Host", header_style="bold magenta", show_lines=True)
-        score_tabla.add_column("Host", style="bold white")
-        score_tabla.add_column("Score", justify="center")
-        score_tabla.add_column("Nivel", justify="center")
-        score_tabla.add_column("Factores principales", overflow="fold")
-        for host, s in scores.items():
-            score_tabla.add_row(
-                host,
-                f"{s['score']}/100",
-                s["nivel"],
-                " | ".join(s["breakdown"][:3]) or "—",
-            )
-        console.print("\n")
-        console.print(score_tabla)
+        # 🎯 Filtrar hosts que realmente tengan un score > 0 para mostrar la tabla de riesgo
+        hosts_con_riesgo = {h: s for h, s in scores.items() if s['score'] > 0}
+        
+        if hosts_con_riesgo:
+            score_tabla = Table(title="🎯 Risk Score por Host", header_style="bold magenta", show_lines=True)
+            score_tabla.add_column("Host", style="bold white")
+            score_tabla.add_column("Score", justify="center")
+            score_tabla.add_column("Nivel", justify="center")
+            score_tabla.add_column("Factores principales", overflow="fold")
+            for host, s in hosts_con_riesgo.items():
+                score_tabla.add_row(
+                    host,
+                    f"{s['score']}/100",
+                    s["nivel"],
+                    " | ".join(s["breakdown"][:3]) or "—",
+                )
+            console.print("\n")
+            console.print(score_tabla)
 
         if lista_vulns:
             console.print(f"\n[bold red]🚨 {len(lista_vulns)} vulnerabilidad(es) NSE confirmada(s).[/bold red]")
@@ -677,8 +664,14 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
             "\n[bold cyan]?[/bold cyan] ¿Exportar resultados a Markdown?", default=False
         )
         if exportar_ahora:
+            default_name = f"scan_{target.replace('.','_').replace('/','_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            nombre = Prompt.ask(
+                f"[bold cyan]?[/bold cyan] Nombre del archivo [dim](Enter = {default_name}.md)[/dim]",
+                default=""
+            ).strip()
             archivo = exportar_markdown(target, lista_resultados, perfil["desc"],
-                                        lista_vulns, scores, cves_por_host)
+                                        lista_vulns, scores, cves_por_host,
+                                        nombre_archivo=nombre)
             console.print(f"[bold green][✓] Reporte guardado:[/bold green] [white]{archivo}[/white]")
     else:
         console.print("\n[bold yellow][!] Sin puertos abiertos (cerrados o filtrados).[/bold yellow]")
