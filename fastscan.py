@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 FastScan CLI v3 - Herramienta de Pentesting con Nmap
-Features optimizadas: ETA real, perfiles avanzados, ruteo SOCKS, NVD API Lookups estables y Risk Scoring.
+Features optimizadas: Menú persistente en bucle, ETA real, perfiles avanzados, NVD Lookups y Risk Scoring.
 """
 
 import sys
@@ -202,7 +202,6 @@ def buscar_cves_nvd(producto: str, version: str) -> list:
     if cache_key in _cve_cache:
         return _cve_cache[cache_key]
 
-    # Delay táctico anti Rate Limit de la NVD
     time.sleep(0.6)
     keyword = quote(f"{producto} {version}".strip())
     url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch={keyword}&resultsPerPage=5"
@@ -373,7 +372,6 @@ def exportar_markdown(target: str, resultados: list, perfil_desc: str,
     md += f"| Campo | Valor |\n|---|---|\n"
     md += f"| **Objetivo** | `{target}` |\n| **Fecha** | {fecha} |\n| **Perfil** | `{perfil_desc}` |\n\n"
 
-    # Mostrar la tabla de Score SÓLO si hay algún host con puntaje de riesgo > 0
     hosts_con_riesgo = {h: s for h, s in scores.items() if s['score'] > 0}
     if hosts_con_riesgo:
         md += "## 🎯 Risk Score por Host\n\n"
@@ -420,14 +418,14 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
     ip_res = resolver_hostname(target)
     perfil = PERFILES[perfil_key]
 
-    proxy_disponible = detectar_proxychains()
+    proxy_disponible = lanterns = detectar_proxychains()
     proxy_activo     = False
     if usar_proxychains:
         if proxy_disponible:
             proxy_activo = True
             console.print("[bold cyan][proxy] Proxychains detectado — el escaneo se ruteará por SOCKS/Tor.[/bold cyan]")
         else:
-            console.print("[bold yellow][!] proxychains no encontrado. Continuando sin proxy.[/bold yellow]")
+            console.print("[bold yellow][!] proxychains no encontrado. Continuing sin proxy.[/bold yellow]")
     elif proxy_disponible and perfil_key in ("stealth", "evade"):
         usar = Confirm.ask(
             "[bold cyan]?[/bold cyan] Se detectó proxychains. ¿Rutear el escaneo por Tor/SOCKS?",
@@ -631,7 +629,6 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
         console.print("\n")
         console.print(tabla)
 
-        # 🎯 Filtrar hosts que realmente tengan un score > 0 para mostrar la tabla de riesgo
         hosts_con_riesgo = {h: s for h, s in scores.items() if s['score'] > 0}
         
         if hosts_con_riesgo:
@@ -660,7 +657,7 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
         console.print(f"[bold green]\n[+] Escaneo finalizado. {len(lista_resultados)} puerto(s) abierto(s).[/bold green]")
         _notificar(f"Escaneo finalizado: {target} ({len(lista_resultados)} puertos)")
 
-        exportar_ahora = exportar or Confirm.ask(
+        exportar_ahora = Confirm.ask(
             "\n[bold cyan]?[/bold cyan] ¿Exportar resultados a Markdown?", default=False
         )
         if exportar_ahora:
@@ -679,7 +676,7 @@ def ejecutar_escaneo(target_raw: str, perfil_key: str, verbose: bool,
 
 
 # ─────────────────────────────────────────────────────────────
-#  MENÚ INTERACTIVO
+#  MENÚ INTERACTIVO (Bucle Persistente)
 # ─────────────────────────────────────────────────────────────
 MENU_PERFILES = {
     "1": "fast", "2": "deep",  "3": "stealth", "4": "evade",
@@ -687,30 +684,50 @@ MENU_PERFILES = {
 }
 
 def mostrar_menu():
-    console.print(Panel(
-        "\n".join([
-            "[bold white]1.[/bold white] [cyan]Reconocimiento Rápido[/cyan]        -T4 -F Top100",
-            "[bold white]2.[/bold white] [cyan]Escaneo Completo[/cyan]              -sS -sV -sC -O -p-",
-            "[bold white]3.[/bold white] [cyan]Escaneo Sigiloso[/cyan]              -sS -T2 -f --randomize",
-            "[bold white]4.[/bold white] [bold red]Evasión Avanzada[/bold red]             -f --mtu 8 --decoy RND:5 --spoof-mac",
-            "[bold white]5.[/bold white] [cyan]Escaneo UDP[/cyan]                   -sU Top 200",
-            "[bold white]6.[/bold white] [cyan]Auditoría Web[/cyan]                 HTTP/S + NSE ofensivo",
-            "[bold white]7.[/bold white] [cyan]Auditoría SMB[/cyan]                 EternalBlue, SMBGhost…",
-            "[bold white]8.[/bold white] [cyan]Auditoría de Vulnerabilidades[/cyan] NSE: vuln+exploit+auth",
-            "[bold white]9.[/bold white] [cyan]Descubrimiento de Hosts[/cyan]       Ping scan",
-        ]),
-        title="[bold blue]⚡ FastScan CLI v3 — Menú de Escaneo[/bold blue]",
-        border_style="blue"
-    ))
+    # El bucle while True mantiene viva la interfaz de texto sin cerrarse
+    while True:
+    # 🧹 Limpia la pantalla al volver al menú principal
+        os.system('clear' if os.name != 'nt' else 'cls')
+        console.print("\n")
+        console.print(Panel(
+            "\n".join([
+                "[bold white]1.[/bold white] [cyan]Reconocimiento Rápido[/cyan]        -T4 -F Top100",
+                "[bold white]2.[/bold white] [cyan]Escaneo Completo[/cyan]              -sS -sV -sC -O -p-",
+                "[bold white]3.[/bold white] [cyan]Escaneo Sigiloso[/cyan]              -sS -T2 -f --randomize",
+                "[bold white]4.[/bold white] [bold red]Evasión Avanzada[/bold red]             -f --mtu 8 --decoy RND:5 --spoof-mac",
+                "[bold white]5.[/bold white] [cyan]Escaneo UDP[/cyan]                   -sU Top 200",
+                "[bold white]6.[/bold white] [cyan]Auditoría Web[/cyan]                 HTTP/S + NSE ofensivo",
+                "[bold white]7.[/bold white] [cyan]Auditoría SMB[/cyan]                 EternalBlue, SMBGhost…",
+                "[bold white]8.[/bold white] [cyan]Auditoría de Vulnerabilidades[/cyan] NSE: vuln+exploit+auth",
+                "[bold white]9.[/bold white] [cyan]Descubrimiento de Hosts[/cyan]       Ping scan",
+                "─────────────────────────────────────────────────────────────",
+                "[bold yellow]0. Salir de la interfaz[/bold yellow]",
+            ]),
+            title="[bold blue]⚡ FastScan CLI v3 — Menú de Escaneo[/bold blue]",
+            border_style="blue"
+        ))
 
-    target = Prompt.ask("➔ Objetivo (IP, hostname, URL o rango CIDR)")
-    while not target.strip():
-        target = Prompt.ask("[!] El objetivo no puede estar vacío")
+        target = Prompt.ask("➔ Objetivo (IP, hostname, URL o rango CIDR) o [bold yellow]0[/bold yellow] para salir")
+        if target.strip() == "0":
+            console.print("[bold yellow]\n[*] Saliendo de FastScan v3. ¡Buenas auditorías![/bold yellow]\n")
+            break
 
-    opcion    = Prompt.ask("➔ Modo (1-9)", default="2")
-    perfil_key = MENU_PERFILES.get(opcion, "deep")
-    verbose   = Confirm.ask("➔ ¿Modo verbose (NSE completo)?", default=False)
-    ejecutar_escaneo(target, perfil_key, verbose)
+        while not target.strip():
+            target = Prompt.ask("[!] El objetivo no puede estar vacío")
+
+        opcion = Prompt.ask("➔ Modo (0-9)", default="2")
+        if opcion == "0":
+            console.print("[bold yellow]\n[*] Saliendo de FastScan v3. ¡Buenas auditorías![/bold yellow]\n")
+            break
+
+        perfil_key = MENU_PERFILES.get(opcion, "deep")
+        verbose   = Confirm.ask("➔ ¿Modo verbose (NSE completo)?", default=False)
+        
+        # Ejecuta la lógica del escaneo sin morir al finalizar
+        ejecutar_escaneo(target, perfil_key, verbose)
+        
+        console.print("\n[dim]─────────────────────────────────────────────────────────────[/dim]")
+        input("Presioná [Enter] para volver al Menú Principal...")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -725,9 +742,6 @@ if __name__ == "__main__":
 Ejemplos:
   sudo python3 fastscan.py 192.168.1.0/24 --recon
   sudo python3 fastscan.py 10.0.0.5 --deep -v --export
-  sudo python3 fastscan.py 10.0.0.5 --evade --proxychains
-  sudo python3 fastscan.py example.com --web --export
-  sudo python3 fastscan.py 10.0.0.5 --vuln -v --export
             """
         )
         parser.add_argument("target",        help="IP, dominio, URL o rango CIDR")
@@ -739,7 +753,7 @@ Ejemplos:
         group.add_argument("--fast",    action="store_true")
         group.add_argument("--deep",    action="store_true")
         group.add_argument("--stealth", action="store_true")
-        group.add_argument("--evade",   action="store_true", help="Evasión avanzada (decoys, spoof, fragmentación)")
+        group.add_argument("--evade",   action="store_true")
         group.add_argument("--udp",     action="store_true")
         group.add_argument("--web",     action="store_true")
         group.add_argument("--smb",     action="store_true")
